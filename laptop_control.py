@@ -28,9 +28,9 @@ log = logging.getLogger("LaptopControl")
 DETECT_COLORS: Optional[List[str]] = ["red", "green", "yellow"]
 DETECT_CODES:  Optional[List[str]] = ["QRCODE"]
 
-CAM_RESOLUTION: int = 8  
-CAM_FRAMERATE:  int = 30
-CAM_QUALITY:    int = 18
+CAM_RESOLUTION: int = 8
+CAM_FRAMERATE:  int = 15
+CAM_QUALITY:    int = 20
 
 MAGIC_VIDEO     = b'\xAA\xBB'
 MAGIC_CMD       = b'\xCC\xDD'
@@ -49,6 +49,7 @@ CMD_SET_SPEED = 0x03
 CMD_FOLLOW    = 0x04
 CMD_TURN      = 0x05
 CMD_SCAN_REFLECTIONS = 0x06
+CMD_SET_FLASH_N = 0x10
 CMD_ESTOP     = 0xFF
 
 def get_local_ip() -> str:
@@ -199,6 +200,7 @@ class LaptopControlServer:
     def cmd_follow(self, tx, ty, depth):  self.send_master_command(CMD_FOLLOW,    struct.pack("!fff", tx, ty, depth))
     def cmd_set_speed(self, speed):       self.send_master_command(CMD_SET_SPEED, struct.pack("!f",   speed))
     def cmd_scan_reflections(self):       self.send_cam_command(CMD_SCAN_REFLECTIONS)
+    def cmd_set_flash_n(self, n: int):    self.send_cam_command(CMD_SET_FLASH_N, struct.pack("!B", n))
 
     def _send_handshake(self):
         pkt = MAGIC_HANDSHAKE + struct.pack("BBB", self.cfg.cam_resolution, self.cfg.cam_framerate, self.cfg.cam_quality)
@@ -319,7 +321,7 @@ class LaptopControlServer:
         if self.on_detection: self.on_detection(result)
 
     def _window_loop(self):
-        WIN = "Laptop Control  |  Q=Quit, S=Scan Reflections"
+        WIN = "Laptop | Q=Quit S=1Scan F=AutoFlash +/-=Rate"
         cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WIN, 800, 600)
         ph = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -343,8 +345,25 @@ class LaptopControlServer:
             key = cv2.waitKey(1) & 0xFF
             if key in (ord('q'), ord('Q'), 27): break
             elif key == ord('s'):
-                log.info("Scanning reflections...")
+                log.info("Scanning single reflection...")
                 self.cmd_scan_reflections()
+            elif key == ord('f'):
+                new_n = 0 if getattr(self, '_auto_flash_n', 0) > 0 else 5
+                self._auto_flash_n = new_n
+                log.info(f"Auto-flash every {new_n} frames" if new_n else "Auto-flash disabled")
+                self.cmd_set_flash_n(new_n)
+            elif key in (ord('+'), ord('=')):
+                curr_n = getattr(self, '_auto_flash_n', 0)
+                if curr_n > 0:
+                    self._auto_flash_n = curr_n + 1
+                    log.info(f"Auto-flash every {self._auto_flash_n} frames")
+                    self.cmd_set_flash_n(self._auto_flash_n)
+            elif key in (ord('-'), ord('_')):
+                curr_n = getattr(self, '_auto_flash_n', 0)
+                if curr_n > 1:
+                    self._auto_flash_n = curr_n - 1
+                    log.info(f"Auto-flash every {self._auto_flash_n} frames")
+                    self.cmd_set_flash_n(self._auto_flash_n)
             time.sleep(0.008)
 
         cv2.destroyAllWindows()

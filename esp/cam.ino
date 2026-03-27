@@ -47,6 +47,8 @@ const uint8_t CMD_SCAN_REFLECTIONS = 0x06;
 enum ScanState { SCAN_IDLE, SCAN_TURN_ON, SCAN_DISCARD, SCAN_CAPTURE };
 ScanState g_scanState = SCAN_IDLE;
 uint32_t g_scanTimer = 0;
+uint8_t g_flashEveryN = 0; // 0 = disabled, >0 = flash every N frames
+uint16_t g_flashCounter = 0;
 
 const size_t CHUNK_SIZE = 1400;
 static uint8_t udpBuf[CHUNK_SIZE + 8];
@@ -213,19 +215,24 @@ void receiveCommands() {
     if (g_scanState == SCAN_IDLE) {
       g_scanState = SCAN_TURN_ON;
     }
+  } else if (cmdId == 0x10) { // CMD_SET_FLASH_N
+    if (payloadLen >= 1 && len >= 6) {
+      g_flashEveryN = buf[5];
+      g_flashCounter = 0; // Reset counter so it flashes deterministically
+      Serial.printf("[CMD] Auto-flash every %d frames\n", g_flashEveryN);
+    }
   }
+}
+
+void toggleFlash() {
+  digitalWrite(FLASH_GPIO_NUM, !digitalRead(FLASH_GPIO_NUM));
 }
 
 void setup() {
   Serial.begin(115200);
 
-  // Un-hold GPIO4 in case it was held by deep sleep
-  rtc_gpio_hold_dis(GPIO_NUM_4);
-
-  // Init flash via LEDC PWM (v3 API) — no pinMode needed before
-  // ledcAttachChannel
-  ledcAttachChannel(FLASH_GPIO_NUM, 5000, 8, FLASH_LEDC_CHANNEL);
-  ledcWrite(FLASH_GPIO_NUM, 0); // Off
+  pinMode(FLASH_GPIO_NUM, OUTPUT);
+  digitalWrite(FLASH_GPIO_NUM, LOW);
 
   if (!initCamera()) {
     while (true)
@@ -241,6 +248,10 @@ void setup() {
   Serial.printf("\n[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
 
   udp.begin(CAM_PORT);
+
+  toggleFlash();
+  delay(100);
+  toggleFlash();
 }
 
 void loop() {
@@ -249,29 +260,42 @@ void loop() {
 
   // --- Non-Blocking Flash Sequence ---
   if (g_scanState == SCAN_TURN_ON) {
-    ledcWrite(FLASH_GPIO_NUM, 40); // 40/255 duty — bright but brownout-safe
+    // 1) First, explicitly grab and send a fresh ambient/OFF frame
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (fb) {
+      sendFrame(fb->buf, fb->len, 0); // flash_state = 0 (OFF)
+      esp_camera_fb_return(fb);
+    }
+
+    // 2) Turn flash ON using user's toggle function
+    toggleFlash();
     g_scanTimer = now;
     g_scanState = SCAN_DISCARD;
 
   } else if (g_scanState == SCAN_DISCARD) {
-    // Wait ~50ms then discard the partial rolling-shutter frame
-    if (now - g_scanTimer > 50) {
+    // Wait ~60ms to clear the rolling shutter
+    if (now - g_scanTimer > 60) {
+      // Discard partial frame (exposed while flash was turning on)
       camera_fb_t *fb = esp_camera_fb_get();
       if (fb)
         esp_camera_fb_return(fb);
+
       g_scanTimer = now;
       g_scanState = SCAN_CAPTURE;
     }
 
   } else if (g_scanState == SCAN_CAPTURE) {
-    // Wait another ~50ms then grab the fully illuminated frame
-    if (now - g_scanTimer > 50) {
+    // Wait another ~60ms to assure the frame is entirely illuminated
+    if (now - g_scanTimer > 60) {
+      // 3) Grab the fully illuminated ON frame
       camera_fb_t *fb = esp_camera_fb_get();
       if (fb) {
-        sendFrame(fb->buf, fb->len, 1);
+        sendFrame(fb->buf, fb->len, 1); // flash_state = 1 (ON)
         esp_camera_fb_return(fb);
       }
-      ledcWrite(FLASH_GPIO_NUM, 0); // Flash off
+
+      // 4) Turn flash OFF
+      toggleFlash();
       g_scanState = SCAN_IDLE;
       lastFrameMs = now; // Prevent immediate normal-stream frame
     }
@@ -281,10 +305,27 @@ void loop() {
   if (ENABLE_STREAM && g_scanState == SCAN_IDLE &&
       (now - lastFrameMs >= g_frameIntervalMs)) {
     lastFrameMs = now;
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (fb) {
-      sendFrame(fb->buf, fb->len, 0);
-      esp_camera_fb_return(fb);
+
+    // Check if autonomous strobe is enabled
+    bool doAutoFlash = false;
+    if (g_flashEveryN > 0) {
+      g_flashCounter++;
+      if (g_flashCounter >= g_flashEveryN) {
+        g_flashCounter = 0;
+        doAutoFlash = true;
+      }
+    }
+
+    if (doAutoFlash) {
+      // Divert straight into the hardware-synced strobe sequence
+      g_scanState = SCAN_TURN_ON;
+    } else {
+      // Otherwise, just grab an ambient frame
+      camera_fb_t *fb = esp_camera_fb_get();
+      if (fb) {
+        sendFrame(fb->buf, fb->len, 0);
+        esp_camera_fb_return(fb);
+      }
     }
   }
 
