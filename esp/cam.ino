@@ -42,6 +42,7 @@ static const uint8_t FRAMESIZE_MAP_LEN =
 volatile uint32_t g_frameIntervalMs = FRAME_INTERVAL_MS;
 
 const uint8_t CMD_SCAN_REFLECTIONS = 0x06;
+const uint8_t CMD_SET_FLASH = 0x11;
 
 // Non-blocking Flash State Machine
 enum ScanState { SCAN_IDLE, SCAN_TURN_ON, SCAN_DISCARD, SCAN_CAPTURE };
@@ -220,6 +221,17 @@ void receiveCommands() {
       g_flashEveryN = buf[5];
       g_flashCounter = 0; // Reset counter so it flashes deterministically
       Serial.printf("[CMD] Auto-flash every %d frames\n", g_flashEveryN);
+    }
+  } else if (cmdId == CMD_SET_FLASH) {
+    if (payloadLen >= 1 && len >= 6) {
+      uint8_t state = buf[5];
+      if (state == 0)
+        digitalWrite(FLASH_GPIO_NUM, LOW);
+      else if (state == 1)
+        digitalWrite(FLASH_GPIO_NUM, HIGH);
+      else
+        toggleFlash();
+      Serial.printf("[CMD] Flash state set to %d\n", state);
     }
   }
 }

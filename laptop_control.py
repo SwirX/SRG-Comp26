@@ -29,9 +29,9 @@ log = logging.getLogger("LaptopControl")
 DETECT_COLORS: Optional[List[str]] = ["red", "green", "yellow"]
 DETECT_CODES:  Optional[List[str]] = ["QRCODE"]
 
-CAM_RESOLUTION: int = 8
+CAM_RESOLUTION: int = 5
 CAM_FRAMERATE:  int = 15
-CAM_QUALITY:    int = 20
+CAM_QUALITY:    int = 12
 
 MAGIC_VIDEO     = b'\xAA\xBB'
 MAGIC_CMD       = b'\xCC\xDD'
@@ -51,6 +51,7 @@ CMD_FOLLOW    = 0x04
 CMD_TURN      = 0x05
 CMD_SCAN_REFLECTIONS = 0x06
 CMD_SET_FLASH_N = 0x10
+CMD_SET_FLASH = 0x11
 CMD_ESTOP     = 0xFF
 
 ANNOUNCE_PORT = 4999   # master broadcasts "QUAD:<ip>" here every 3 s
@@ -108,10 +109,20 @@ class ArucoColorStore:
         considered "co-located" with a marker.  Tune per your camera FOV.
     """
 
-    def __init__(self, max_dist_px: int = 120):
+    def __init__(self, max_dist_px: int = 120, file_path: str = "aruco_map.json"):
         self.max_dist_px = max_dist_px
+        self._file_path = file_path
         self._pairs: dict[int, str] = {}       # aruco_id → color
         self._lock  = threading.Lock()
+
+        if os.path.exists(self._file_path):
+            try:
+                import json
+                with open(self._file_path, "r") as f:
+                    data = json.load(f)
+                    self._pairs = {int(k): v for k, v in data.items()}
+            except Exception as e:
+                log.warning(f"Could not load {self._file_path}: {e}")
 
     @property
     def pairs(self) -> dict:
@@ -154,6 +165,14 @@ class ArucoColorStore:
                         f"(dist={best_dist:.1f}px)"
                     )
                 # else: already bound — silently skip
+
+        if new_pairs:
+            try:
+                import json
+                with open(self._file_path, "w") as f:
+                    json.dump(self._pairs, f)
+            except Exception as e:
+                log.warning(f"Failed to save {self._file_path}: {e}")
 
         return new_pairs
 
@@ -208,7 +227,7 @@ class LaptopControlServer:
 
         self.detector = None
         if config.run_detector and DETECTOR_AVAILABLE:
-            self.detector = VisionDetector(min_area=800, draw_overlay=True, on_detection=self._on_detection)
+            self.detector = VisionDetector(min_area=800, draw_overlay=True, max_objects=1, on_detection=self._on_detection)
 
         self.aruco_color_store = ArucoColorStore(max_dist_px=120)
 
@@ -289,6 +308,20 @@ class LaptopControlServer:
     def cmd_set_speed(self, speed):       self.send_master_command(CMD_SET_SPEED, struct.pack("!f",   speed))
     def cmd_scan_reflections(self):       self.send_cam_command(CMD_SCAN_REFLECTIONS)
     def cmd_set_flash_n(self, n: int):    self.send_cam_command(CMD_SET_FLASH_N, struct.pack("!B", n))
+    def cmd_set_flash(self, state: int):  self.send_cam_command(CMD_SET_FLASH, struct.pack("!B", state))
+
+    def cmd_take_picture(self, filename: Optional[str] = None) -> bool:
+        with self._frame_lock:
+            pic = self._latest_raw.copy() if self._latest_raw is not None else None
+        
+        if pic is not None:
+            if not filename:
+                os.makedirs("debug_logs", exist_ok=True)
+                filename = os.path.join("debug_logs", f"snapshot_{int(time.time()*1000)}.jpg")
+            cv2.imwrite(filename, pic)
+            log.info(f"Captured image to {filename}")
+            return True
+        return False
 
     # ── Discovery ────────────────────────────────────────────────────────────
 
@@ -448,7 +481,7 @@ class LaptopControlServer:
         if self.on_detection: self.on_detection(result)
 
     def _window_loop(self):
-        WIN = "Laptop | P=Pic Q=Quit S=1Scan F=Flash +/-=Rate"
+        WIN = "Laptop | P=Pic L=Flash Q=Quit S=1Scan F=AutoFlash +/-=Rate"
         cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WIN, 800, 600)
         ph = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -492,15 +525,9 @@ class LaptopControlServer:
                     log.info(f"Auto-flash every {self._auto_flash_n} frames")
                     self.cmd_set_flash_n(self._auto_flash_n)
             elif key in (ord('p'), ord('P')):
-                with self._frame_lock:
-                    pic = self._latest_raw.copy() if getattr(self, '_latest_raw', None) is not None else None
-                if pic is not None:
-                    os.makedirs("debug_logs", exist_ok=True)
-                    fname = os.path.join("debug_logs", f"cam_debug_{int(time.time()*1000)}.jpg")
-                    cv2.imwrite(fname, pic)
-                    log.info(f"Saved picture to {fname}")
-                else:
-                    log.warning("No picture available to save yet.")
+                self.cmd_take_picture()
+            elif key in (ord('l'), ord('L')):
+                self.cmd_set_flash(2) # Toggle flash
             time.sleep(0.008)
 
         cv2.destroyAllWindows()

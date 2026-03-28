@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>QUAD CTRL</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap');
+
+        :root {
+            --bg: #080c0f;
+            --panel: #0d1419;
+            --border: #1a2a35;
+            --accent: #00e5ff;
+            --accent2: #ff6b00;
+            --danger: #ff2244;
+            --ok: #00ff88;
+            --dim: #2a4050;
+            --text: #c8dde8;
+            --mono: 'Share Tech Mono', monospace;
+            --head: 'Orbitron', sans-serif;
+        }
+
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--mono);
+            overflow: hidden;
+            touch-action: none;
+            user-select: none;
+        }
+
+        /* scanline overlay */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background: repeating-linear-gradient(0deg, transparent, transparent 2px,
+                    rgba(0, 0, 0, 0.08) 2px, rgba(0, 0, 0, 0.08) 4px);
+            pointer-events: none;
+            z-index: 999;
+        }
+
+        /* grid bg */
+        body::after {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(0, 229, 255, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 229, 255, 0.03) 1px, transparent 1px);
+            background-size: 40px 40px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        #app {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            padding: 10px;
+            gap: 8px;
+        }
+
+        /* ── Header ── */
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 6px;
+        }
+
+        .logo {
+            font-family: var(--head);
+            font-size: clamp(14px, 3vw, 20px);
+            font-weight: 900;
+            letter-spacing: 0.2em;
+            color: var(--accent);
+            text-shadow: 0 0 12px var(--accent);
+        }
+
+        .logo span {
+            color: var(--accent2);
+        }
+
+        #status-bar {
+            font-size: 11px;
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--danger);
+            box-shadow: 0 0 6px var(--danger);
+            transition: background .3s, box-shadow .3s;
+        }
+
+        .dot.on {
+            background: var(--ok);
+            box-shadow: 0 0 8px var(--ok);
+        }
+
+        #robot-ip {
+            color: var(--dim);
+            font-size: 10px;
+        }
+
+        /* ── Main layout ── */
+        .main {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            grid-template-rows: 1fr auto;
+            gap: 8px;
+            min-height: 0;
+        }
+
+        /* ── Panels ── */
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 10px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .panel::before {
+            content: attr(data-label);
+            position: absolute;
+            top: 6px;
+            left: 8px;
+            font-size: 9px;
+            letter-spacing: .15em;
+            color: var(--dim);
+            text-transform: uppercase;
+        }
+
+        /* ── Joystick ── */
+        #joy-panel {
+            grid-column: 1;
+            grid-row: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #joy-wrap {
+            position: relative;
+            width: min(200px, 42vw);
+            aspect-ratio: 1;
+        }
+
+        #joy-base {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: radial-gradient(circle at 40% 35%, #152030, #080c0f);
+            border: 2px solid var(--border);
+            box-shadow: inset 0 0 30px rgba(0, 0, 0, .6), 0 0 20px rgba(0, 229, 255, .05);
+            position: relative;
+        }
+
+        /* cross-hair */
+        #joy-base::before,
+        #joy-base::after {
+            content: '';
+            position: absolute;
+            background: var(--border);
+            border-radius: 1px;
+        }
+
+        #joy-base::before {
+            width: 1px;
+            height: 60%;
+            top: 20%;
+            left: calc(50% - .5px);
+        }
+
+        #joy-base::after {
+            height: 1px;
+            width: 60%;
+            left: 20%;
+            top: calc(50% - .5px);
+        }
+
+        /* range ring */
+        .joy-ring {
+            position: absolute;
+            border-radius: 50%;
+            border: 1px dashed var(--dim);
+            opacity: .4;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        #joy-knob {
+            position: absolute;
+            width: 36%;
+            aspect-ratio: 1;
+            border-radius: 50%;
+            background: radial-gradient(circle at 35% 30%, #1e3a50, #0a1820);
+            border: 2px solid var(--accent);
+            box-shadow: 0 0 14px rgba(0, 229, 255, .5);
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            transition: box-shadow .1s;
+            cursor: grab;
+        }
+
+        #joy-knob.active {
+            box-shadow: 0 0 24px rgba(0, 229, 255, .9);
+            cursor: grabbing;
+        }
+
+        /* joy direction labels */
+        .joy-lbl {
+            position: absolute;
+            font-size: 10px;
+            color: var(--dim);
+            font-family: var(--head);
+            letter-spacing: .1em;
+        }
+
+        .joy-lbl.n {
+            top: 2px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .joy-lbl.s {
+            bottom: 2px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .joy-lbl.w {
+            left: 2px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .joy-lbl.e {
+            right: 2px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        /* ── Center column ── */
+        #center {
+            grid-column: 2;
+            grid-row: 1 / 3;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            align-items: center;
+            justify-content: space-between;
+            min-width: 90px;
+        }
+
+        /* vector display */
+        #vec-display {
+            width: 80px;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 8px 6px;
+            font-size: 10px;
+            line-height: 1.8;
+        }
+
+        .vec-row {
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .vec-key {
+            color: var(--dim);
+        }
+
+        .vec-val {
+            color: var(--accent);
+            font-weight: bold;
+        }
+
+        /* ESTOP */
+        #btn-estop {
+            width: 72px;
+            height: 72px;
+            border-radius: 50%;
+            background: radial-gradient(circle at 40% 35%, #3a0010, #1a0008);
+            border: 3px solid var(--danger);
+            color: var(--danger);
+            font-family: var(--head);
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: .1em;
+            cursor: pointer;
+            box-shadow: 0 0 16px rgba(255, 34, 68, .3);
+            transition: all .15s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            line-height: 1.3;
+        }
+
+        #btn-estop:active,
+        #btn-estop.fired {
+            background: var(--danger);
+            color: #fff;
+            box-shadow: 0 0 32px rgba(255, 34, 68, .8);
+            transform: scale(.95);
+        }
+
+        /* speed */
+        #speed-wrap {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+            width: 80px;
+        }
+
+        .slabel {
+            font-size: 9px;
+            color: var(--dim);
+            letter-spacing: .1em;
+        }
+
+        #speed-val {
+            font-size: 13px;
+            color: var(--accent2);
+            font-weight: bold;
+        }
+
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 4px;
+            background: var(--border);
+            border-radius: 2px;
+            outline: none;
+        }
+
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: var(--accent2);
+            box-shadow: 0 0 8px var(--accent2);
+            cursor: pointer;
+        }
+
+        /* ── Turn panel ── */
+        #turn-panel {
+            grid-column: 3;
+            grid-row: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+            flex-direction: column;
+        }
+
+        .turn-btn {
+            width: min(80px, 18vw);
+            aspect-ratio: 1;
+            border-radius: 50%;
+            background: var(--panel);
+            border: 2px solid var(--border);
+            color: var(--accent);
+            font-size: clamp(18px, 5vw, 28px);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all .1s;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .turn-btn:active,
+        .turn-btn.pressed {
+            background: rgba(0, 229, 255, .1);
+            border-color: var(--accent);
+            box-shadow: 0 0 16px rgba(0, 229, 255, .4);
+            transform: scale(.94);
+        }
+
+        /* ── Keys panel ── */
+        #keys-panel {
+            grid-column: 1 / 3;
+            grid-row: 2;
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            padding: 6px 10px;
+        }
+
+        .key-hint {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+        }
+
+        .key {
+            width: 28px;
+            height: 28px;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            background: #0d1a22;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            color: var(--text);
+            transition: background .1s, border-color .1s;
+        }
+
+        .key.active {
+            background: rgba(0, 229, 255, .15);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .key-desc {
+            font-size: 8px;
+            color: var(--dim);
+        }
+
+        .key-row {
+            display: flex;
+            gap: 4px;
+        }
+
+        /* ── Log ── */
+        #log-panel {
+            grid-column: 3;
+            grid-row: 2;
+            padding: 6px 8px;
+        }
+
+        #log {
+            font-size: 9px;
+            line-height: 1.6;
+            color: var(--dim);
+            height: 50px;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+
+        #log p {
+            border-left: 2px solid var(--border);
+            padding-left: 5px;
+            margin-bottom: 2px;
+        }
+
+        #log p.cmd {
+            border-color: var(--accent);
+            color: var(--text);
+        }
+
+        #log p.err {
+            border-color: var(--danger);
+            color: var(--danger);
+        }
+
+        #log p.ok {
+            border-color: var(--ok);
+            color: var(--ok);
+        }
+    </style>
+</head>
+
+<body>
+    <div id="app">
+        <header>
+            <div class="logo">QUAD<span>CTRL</span></div>
+            <div id="status-bar">
+                <div class="dot" id="ws-dot"></div>
+                <span id="ws-label">DISCONNECTED</span>
+                <span id="robot-ip">robot: –</span>
+            </div>
+        </header>
+
+        <div class="main">
+
+            <!-- Joystick (move) -->
+            <div class="panel" id="joy-panel" data-label="MOVE">
+                <div id="joy-wrap">
+                    <div id="joy-base">
+                        <div class="joy-ring" style="width:50%;height:50%"></div>
+                        <div class="joy-ring" style="width:80%;height:80%"></div>
+                        <span class="joy-lbl n">FWD</span>
+                        <span class="joy-lbl s">BWD</span>
+                        <span class="joy-lbl w">L</span>
+                        <span class="joy-lbl e">R</span>
+                        <div id="joy-knob"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Center -->
+            <div id="center">
+                <div id="vec-display">
+                    <div class="vec-row"><span class="vec-key">VX</span><span class="vec-val" id="d-vx">0.00</span>
+                    </div>
+                    <div class="vec-row"><span class="vec-key">VY</span><span class="vec-val" id="d-vy">0.00</span>
+                    </div>
+                    <div class="vec-row"><span class="vec-key">YW</span><span class="vec-val" id="d-yw">0.00</span>
+                    </div>
+                    <div class="vec-row"><span class="vec-key">SP</span><span class="vec-val" id="d-sp">1.00</span>
+                    </div>
+                </div>
+
+                <button id="btn-estop">E<br>STOP</button>
+
+                <div id="speed-wrap">
+                    <span class="slabel">SPEED</span>
+                    <span id="speed-val">1.0</span>
+                    <input type="range" id="speed-slider" min="0" max="100" value="100">
+                </div>
+            </div>
+
+            <!-- Turn buttons -->
+            <div class="panel" id="turn-panel" data-label="TURN">
+                <button class="turn-btn" id="btn-left" data-yaw="-1">↺</button>
+                <button class="turn-btn" id="btn-right" data-yaw="1">↻</button>
+            </div>
+
+            <!-- Key hints -->
+            <div class="panel" id="keys-panel" data-label="KEYBOARD">
+                <div class="key-hint">
+                    <div class="key-row">
+                        <div class="key" id="key-w">W</div>
+                    </div>
+                    <div class="key-row">
+                        <div class="key" id="key-a">A</div>
+                        <div class="key" id="key-s">S</div>
+                        <div class="key" id="key-d">D</div>
+                    </div>
+                    <span class="key-desc">MOVE</span>
+                </div>
+                <div style="width:1px;height:40px;background:var(--border);margin:0 8px"></div>
+                <div class="key-hint">
+                    <div class="key-row">
+                        <div class="key" id="key-q">Q</div>
+                        <div class="key" id="key-e">E</div>
+                    </div>
+                    <span class="key-desc">TURN</span>
+                </div>
+                <div style="width:1px;height:40px;background:var(--border);margin:0 8px"></div>
+                <div class="key-hint">
+                    <div class="key-row">
+                        <div class="key" id="key-spc">SPC</div>
+                    </div>
+                    <span class="key-desc">ESTOP</span>
+                </div>
+            </div>
+
+            <!-- Log -->
+            <div class="panel" id="log-panel" data-label="LOG">
+                <div id="log"></div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        // ── Config ────────────────────────────────────────────────────
+        // Set your PC IP here if opening via file:// or from mobile
+        const BRIDGE_IP = "";  // e.g. "192.168.1.50" — leave blank when served via http
+        const WS_URL = `ws://${BRIDGE_IP || location.hostname}:8765`;
+        const SEND_HZ = 20;   // command rate
+
+        // ── State ─────────────────────────────────────────────────────
+        let ws, connected = false;
+        let vx = 0, vy = 0, yaw = 0, speed = 1.0;
+        let estop = false;
+        let lastSent = {};
+
+        // ── Log ───────────────────────────────────────────────────────
+        const logEl = document.getElementById('log');
+        function addLog(msg, cls = '') {
+            const p = document.createElement('p');
+            if (cls) p.className = cls;
+            p.textContent = msg;
+            logEl.prepend(p);
+            while (logEl.children.length > 30) logEl.lastChild.remove();
+        }
+
+        // ── WebSocket ─────────────────────────────────────────────────
+        const wsDot = document.getElementById('ws-dot');
+        const wsLabel = document.getElementById('ws-label');
+        const robotIp = document.getElementById('robot-ip');
+
+        function connect() {
+            ws = new WebSocket(WS_URL);
+            ws.onopen = () => {
+                connected = true;
+                wsDot.classList.add('on');
+                wsLabel.textContent = 'CONNECTED';
+                addLog('WS connected', 'ok');
+                ping();
+            };
+            ws.onclose = () => {
+                connected = false;
+                wsDot.classList.remove('on');
+                wsLabel.textContent = 'RECONNECTING…';
+                addLog('WS lost — retry in 2s', 'err');
+                setTimeout(connect, 2000);
+            };
+            ws.onerror = () => { };
+            ws.onmessage = e => {
+                try {
+                    const d = JSON.parse(e.data);
+                    if (d.type === 'pong' && d.robot) {
+                        robotIp.textContent = `robot: ${d.robot}`;
+                    }
+                } catch { }
+            };
+        }
+
+        function send(obj) {
+            if (connected && ws.readyState === 1)
+                ws.send(JSON.stringify(obj));
+        }
+
+        function ping() {
+            send({ type: 'ping' });
+            setTimeout(ping, 3000);
+        }
+
+        // ── Command loop ──────────────────────────────────────────────
+        setInterval(() => {
+            if (!connected || estop) return;
+
+            const moving = Math.abs(vx) > 0.01 || Math.abs(vy) > 0.01;
+            const turning = Math.abs(yaw) > 0.01;
+
+            if (!moving && !turning) {
+                if (lastSent.type !== 'stop') { send({ type: 'stop' }); lastSent = { type: 'stop' }; }
+                return;
+            }
+
+            if (turning && !moving) {
+                const obj = { type: 'turn', yaw };
+                if (JSON.stringify(obj) !== JSON.stringify(lastSent)) { send(obj); lastSent = obj; }
+            } else {
+                const obj = { type: 'move', vx, vy };
+                if (JSON.stringify(obj) !== JSON.stringify(lastSent)) { send(obj); lastSent = obj; }
+            }
+        }, 1000 / SEND_HZ);
+
+        // Update HUD
+        setInterval(() => {
+            document.getElementById('d-vx').textContent = vx.toFixed(2);
+            document.getElementById('d-vy').textContent = vy.toFixed(2);
+            document.getElementById('d-yw').textContent = yaw.toFixed(2);
+            document.getElementById('d-sp').textContent = speed.toFixed(2);
+        }, 80);
+
+        // ── ESTOP ─────────────────────────────────────────────────────
+        const btnEstop = document.getElementById('btn-estop');
+        function doEstop() {
+            estop = true; vx = vy = yaw = 0;
+            send({ type: 'estop' });
+            addLog('!! ESTOP !!', 'err');
+            btnEstop.classList.add('fired');
+            setTimeout(() => { estop = false; btnEstop.classList.remove('fired'); }, 1000);
+        }
+        btnEstop.addEventListener('click', doEstop);
+        btnEstop.addEventListener('touchstart', e => { e.preventDefault(); doEstop(); });
+
+        // ── Speed slider ──────────────────────────────────────────────
+        const speedSlider = document.getElementById('speed-slider');
+        const speedVal = document.getElementById('speed-val');
+        speedSlider.addEventListener('input', () => {
+            speed = speedSlider.value / 100;
+            speedVal.textContent = speed.toFixed(1);
+            send({ type: 'speed', value: speed });
+        });
+
+        // ── Joystick ──────────────────────────────────────────────────
+        const joyBase = document.getElementById('joy-base');
+        const joyKnob = document.getElementById('joy-knob');
+        let joyActive = false, joyOrigin = null;
+
+        function joyMove(cx, cy) {
+            const rect = joyBase.getBoundingClientRect();
+            const r = rect.width / 2;
+            const ox = rect.left + r;
+            const oy = rect.top + r;
+            let dx = cx - ox, dy = cy - oy;
+            const dist = Math.hypot(dx, dy);
+            const maxR = r * 0.65;
+            if (dist > maxR) { dx *= maxR / dist; dy *= maxR / dist; }
+            joyKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+            vx = -(dy / maxR);   // forward = up = negative dy
+            vy = (dx / maxR);   // strafe  = right = positive dx
+        }
+
+        function joyReset() {
+            joyKnob.style.transform = 'translate(-50%, -50%)';
+            joyKnob.classList.remove('active');
+            vx = vy = 0;
+            joyActive = false;
+        }
+
+        joyBase.addEventListener('mousedown', e => { joyActive = true; joyKnob.classList.add('active'); joyMove(e.clientX, e.clientY); });
+        document.addEventListener('mousemove', e => { if (joyActive) joyMove(e.clientX, e.clientY); });
+        document.addEventListener('mouseup', () => { if (joyActive) joyReset(); });
+
+        joyBase.addEventListener('touchstart', e => { e.preventDefault(); joyActive = true; joyKnob.classList.add('active'); joyMove(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+        document.addEventListener('touchmove', e => { if (joyActive) { e.preventDefault(); joyMove(e.touches[0].clientX, e.touches[0].clientY); } }, { passive: false });
+        document.addEventListener('touchend', () => { if (joyActive) joyReset(); });
+
+        // ── Turn buttons ──────────────────────────────────────────────
+        document.querySelectorAll('.turn-btn').forEach(btn => {
+            const dir = parseFloat(btn.dataset.yaw);
+
+            const press = e => { e.preventDefault(); yaw = dir; btn.classList.add('pressed'); };
+            const release = () => { yaw = 0; btn.classList.remove('pressed'); };
+
+            btn.addEventListener('mousedown', press);
+            btn.addEventListener('mouseup', release);
+            btn.addEventListener('mouseleave', release);
+            btn.addEventListener('touchstart', press, { passive: false });
+            btn.addEventListener('touchend', release, { passive: false });
+        });
+
+        // ── Keyboard ──────────────────────────────────────────────────
+        const KEY_MAP = {
+            'w': () => { vx = 1; vy = 0; },
+            's': () => { vx = -1; vy = 0; },
+            'a': () => { vy = -1; vx = 0; },
+            'd': () => { vy = 1; vx = 0; },
+            'q': () => { yaw = -1; },
+            'e': () => { yaw = 1; },
+            'arrowup': () => { vx = 1; },
+            'arrowdown': () => { vx = -1; },
+            'arrowleft': () => { yaw = -1; },
+            'arrowright': () => { yaw = 1; },
+            ' ': doEstop,
+        };
+
+        const KEY_RELEASE = {
+            'w': 'vx', 's': 'vx', 'arrowup': 'vx', 'arrowdown': 'vx',
+            'a': 'vy', 'd': 'vy',
+            'q': 'yaw', 'e': 'yaw', 'arrowleft': 'yaw', 'arrowright': 'yaw',
+        };
+
+        const KEY_EL = { w: 'key-w', s: 'key-s', a: 'key-a', d: 'key-d', q: 'key-q', e: 'key-e', ' ': 'key-spc' };
+        const held = new Set();
+
+        document.addEventListener('keydown', e => {
+            const k = e.key.toLowerCase();
+            if (held.has(k)) return;
+            held.add(k);
+            if (KEY_MAP[k]) { e.preventDefault(); KEY_MAP[k](); }
+            if (KEY_EL[k]) document.getElementById(KEY_EL[k])?.classList.add('active');
+        });
+
+        document.addEventListener('keyup', e => {
+            const k = e.key.toLowerCase();
+            held.delete(k);
+            const axis = KEY_RELEASE[k];
+            if (axis === 'vx') vx = 0;
+            else if (axis === 'vy') vy = 0;
+            else if (axis === 'yaw') yaw = 0;
+            if (KEY_EL[k]) document.getElementById(KEY_EL[k])?.classList.remove('active');
+        });
+
+        // ── Boot ──────────────────────────────────────────────────────
+        connect();
+        addLog('QUAD CTRL ready');
+    </script>
+</body>
+
+</html>
