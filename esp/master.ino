@@ -1,231 +1,312 @@
-// ═══════════════════════════════════════════════════════════
-//  QUADRUPED MASTER  –  ESP32 (IK VERSION - FIXED)
-//  PCA9685 @ 0x40  SDA=21 SCL=22
-//  IK Engine: 2-Link Planar (Hip Pitch, Knee Pitch)
-// ═══════════════════════════════════════════════════════════
+/*
+ * ESP32 Spider Robot - Inverse Kinematics & Walking Engine
+ * 
+ * Configuration:
+ * - 4 Legs, 2 DOF per leg (Hip + Knee)
+ * - Leg Mounting: 45 Degrees splay
+ * - Hardware: ESP32 + PCA9685
+ * - Servo Mapping: Even channels (0, 2, 4... 14)
+ * 
+ * Step 1 Goal: 
+ *   - Initialize ALL servos to 90° (stand position)
+ *   - Wait 2 seconds
+ *   - Walk Forward using IK with REVERSED knee angles (0 = knee UP)
+ */
+
 #include <Wire.h>
-#include <WiFi.h>
-#include <WiFiUdp.h>
+#include <Adafruit_PWMServoDriver.h>
 #include <math.h>
 
-// ── Config ────────────────────────────────────────────────────
-#define WIFI_SSID     "Nyx"
-#define WIFI_PASS     "a123456a"
-#define SERVER_IP     "10.231.28.10"
-#define MASTER_PORT   5006
-#define ANNOUNCE_PORT 4999
+// ============================================================================
+// 1. GLOBAL CONFIGURATION (Settings)
+// ============================================================================
 
-// ── Kinematics ───────────────────────────────────────────────
-#define L1 100.0f   // Hip to Knee (mm)
-#define L2 125.0f   // Knee to Foot (mm)
-#define MAX_REACH (L1 + L2 - 10.0f)
-#define NEUTRAL_HIP  90.0f
-#define NEUTRAL_KNEE 90.0f
-#define STAND_HEIGHT 180.0f 
+// --- Robot Dimensions (cm) ---
+const float UPPER_LEG_LEN = 10.0;   // Coxa/Femur length
+const float LOWER_LEG_LEN = 12.0;   // Tibia length
 
-// Gait Parameters
-#define GAIT_MS      800
-#define STEP_HEIGHT  40.0f
-#define STEP_LENGTH  100.0f
+// --- Servo Settings ---
+#define PCA9685_ADDRESS   0x40
+#define SERVO_FREQ        50        // Analog servos run at ~50 Hz
+#define MIN_PULSE         100       // Minimum pulse width (calibrate for your servo)
+#define MAX_PULSE         500       // Maximum pulse width (calibrate for your servo)
+#define CENTER_PULSE      306       // Approx 1500us for 90 degrees
 
-// ── PCA9685 ───────────────────────────────────────────────────
-#define PCA_ADDR  0x40
-#define PWM_FREQ  50
-#define SERV_MIN  102
-#define SERV_MAX  512
+// --- Movement Settings ---
+const float STAND_HEIGHT    = 15.0; // Height of foot from hip in stand position (cm)
+const float STEP_LENGTH     = 6.0;  // How far forward/back the leg swings (cm)
+const float STEP_HEIGHT     = 4.0;  // How high the leg lifts during swing (cm)
+const int   GAIT_SPEED      = 20;   // Delay in ms between gait steps (Lower = Faster)
 
-void pcaWrite(uint8_t ch, uint16_t off) {
-  Wire.beginTransmission(PCA_ADDR);
-  Wire.write(0x06 + ch * 4);
-  Wire.write(0); Wire.write(0);
-  Wire.write(off & 0xFF); Wire.write(off >> 8);
-  Wire.endTransmission();
-}
+// --- Servo Direction Calibration ---
+// If a leg moves backwards when it should move forwards, toggle the 1 to -1
+// This accounts for mirror mounting on Left vs Right sides
+const int DIR_FL = 1; 
+const int DIR_FR = -1; 
+const int DIR_RL = 1; 
+const int DIR_RR = -1;
 
-void pcaInit() {
-  Wire.beginTransmission(PCA_ADDR);
-  Wire.write(0x00); Wire.write(0x10); Wire.endTransmission(); delay(5);
-  uint8_t pre = (uint8_t)(25000000.0f / (4096.0f * PWM_FREQ) - 1.5f);
-  Wire.beginTransmission(PCA_ADDR);
-  Wire.write(0xFE); Wire.write(pre); Wire.endTransmission();
-  Wire.beginTransmission(PCA_ADDR);
-  Wire.write(0x00); Wire.write(0xA0); Wire.endTransmission(); delay(5);
-}
+// --- Knee Angle Inversion ---
+// Set to true if servo 0 = knee UP, false if servo 0 = knee DOWN
+const bool INVERT_KNEE_ANGLE = true;  // <-- CHANGE THIS based on your mechanical mounting
 
-// ── Servo helpers ─────────────────────────────────────────────
-uint16_t angleToPwm(float a) {
-  a = a < 0 ? 0 : a > 180 ? 180 : a;
-  return (uint16_t)(SERV_MIN + (a / 180.0f) * (SERV_MAX - SERV_MIN));
-}
+// ============================================================================
+// 2. HARDWARE ABSTRACTION
+// ============================================================================
 
-// Leg Mapping: {Knee Channel, Hip Channel}
-static const uint8_t CH[4][2] = {{0,2},{4,6},{8,10},{12,14}};
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(PCA9685_ADDRESS);
 
-// Signs to correct mechanical orientation per leg
-float HIP_SIGN[4]  = { 1,  -1,   1,  -1}; 
-float KNEE_SIGN[4] = { 1,   1,   1,   1};
+// Enum for Leg Indices
+enum LegID { FL, FR, RL, RR, NUM_LEGS };
 
-void setLegNow(uint8_t leg, float kneeDeg, float hipDeg) {
-  float k = NEUTRAL_KNEE + (kneeDeg * KNEE_SIGN[leg]);
-  float h = NEUTRAL_HIP  + (hipDeg  * HIP_SIGN[leg]);
-  pcaWrite(CH[leg][0], angleToPwm(k));
-  pcaWrite(CH[leg][1], angleToPwm(h));
-}
+// Structure to hold Leg Configuration
+struct LegConfig {
+  uint8_t pinKnee;
+  uint8_t pinHip;
+  int     direction; // 1 or -1 for servo reversal (hip direction)
+};
 
-// ── Inverse Kinematics ────────────────────────────────────────
-void solveIK(float x, float y, float &outHip, float &outKnee) {
-  float dist = sqrt(x*x + y*y);
-  if (dist > MAX_REACH) {
-    float scale = MAX_REACH / dist;
-    x *= scale; y *= scale;
-    dist = MAX_REACH;
-  }
+// Pin Mapping based on prompt: 0=Knee, 2=Hip, 4=Knee, 6=Hip...
+const LegConfig legsConfig[NUM_LEGS] = {
+  { 0,  2,  DIR_FL }, // Front Left
+  { 4,  6,  DIR_FR }, // Front Right
+  { 8,  10, DIR_RL }, // Rear Left
+  { 12, 14, DIR_RR }  // Rear Right
+};
 
-  float cosKnee = (x*x + y*y - L1*L1 - L2*L2) / (2.0f * L1 * L2);
-  if (cosKnee > 1.0f) cosKnee = 1.0f;
-  if (cosKnee < -1.0f) cosKnee = -1.0f;
-  
-  float kneeRad = acos(cosKnee);
-  float atan2YX = atan2(y, x);
-  float atan2Term = atan2(L2 * sin(kneeRad), L1 + L2 * cos(kneeRad));
-  float hipRad = atan2YX - atan2Term;
+// ============================================================================
+// 3. INVERSE KINEMATICS CLASS
+// ============================================================================
 
-  outHip  = hipRad  * (180.0f / PI);
-  outKnee = kneeRad * (180.0f / PI); 
-}
+class RobotLeg {
+  public:
+    uint8_t pinKnee;
+    uint8_t pinHip;
+    int     direction;
+    
+    // Current Target Coordinates (Local Leg Plane)
+    // X = Forward/Back along leg mount axis, Y = Height (Down is positive)
+    float targetX; 
+    float targetY;
 
-// ── Protocol ──────────────────────────────────────────────────
-#define CMD_MOVE      0x01
-#define CMD_STOP      0x02
-#define CMD_SET_SPEED 0x03
-#define CMD_FOLLOW    0x04
-#define CMD_TURN      0x05
-#define CMD_ESTOP     0xFF
+    // Current Smoothed Coordinates (for interpolation)
+    float currentX;
+    float currentY;
 
-float  g_vx     = 0, g_vy = 0, g_yaw   = 0, g_speed = 1.0f;
-bool   g_moving = false, g_estop = false;
-
-// ── IK Gait Engine ────────────────────────────────────────────
-void ikGaitTick() {
-  if (g_estop || !g_moving) { 
-    for (uint8_t i = 0; i < 4; i++) setLegNow(i, 0, 0); 
-    return; 
-  }
-
-  float t = (float)(millis() % (uint32_t)GAIT_MS) / (float)GAIT_MS;
-  float stepX = g_vx * STEP_LENGTH * g_speed;
-  float stepY = g_vy * STEP_LENGTH * g_speed;
-  float rotR  = g_yaw * STEP_LENGTH * g_speed;
-
-  static const uint8_t DIAG[4] = {0, 1, 1, 0};
-
-  for (uint8_t leg = 0; leg < 4; leg++) {
-    float phase = fmodf(t + (DIAG[leg] ? 0.5f : 0.0f), 1.0f);
-    float footX, footY;
-    float lift = 0;
-
-    if (phase < 0.5f) {
-      float sw = phase / 0.5f;
-      lift = sinf(sw * PI) * STEP_HEIGHT;
-      footX = stepX * (sw * 2.0f - 1.0f);
-      footY = STAND_HEIGHT - lift;
-    } else {
-      float st = (phase - 0.5f) / 0.5f;
-      lift = 0;
-      footX = stepX * (1.0f - st * 2.0f);
-      footY = STAND_HEIGHT;
+    RobotLeg(uint8_t kPin, uint8_t hPin, int dir) {
+      pinKnee = kPin;
+      pinHip = hPin;
+      direction = dir;
+      currentX = 0;
+      currentY = STAND_HEIGHT;
+      targetX = 0;
+      targetY = STAND_HEIGHT;
     }
 
-    float rotOffset = 0;
-    if (leg == 0 || leg == 2) rotOffset = -rotR;
-    else rotOffset = rotR;
-    footX += rotOffset;
+    // Set the target position for the foot
+    void setTarget(float x, float y) {
+      targetX = x;
+      targetY = y;
+    }
 
-    float hipAng, kneeAng;
-    solveIK(footX, footY, hipAng, kneeAng);
-    
-    // Bias to match mechanical neutral standing pose
-    float kneeBias = -45.0f; 
+    // Update the leg state (Interpolate and Solve IK)
+    void update() {
+      // Simple Linear Interpolation (Lerp) for smooth movement
+      // Move 20% of the way to the target per call
+      currentX = currentX + (targetX - currentX) * 0.2;
+      currentY = currentY + (targetY - currentY) * 0.2;
 
-    setLegNow(leg, kneeAng + kneeBias, hipAng);
+      // Solve IK
+      float kneeAngle = 0;
+      float hipAngle = 0;
+      solveIK(currentX, currentY, kneeAngle, hipAngle);
+
+      // Write to Servos
+      // KNEE: Apply inversion if configured (0 = knee UP)
+      if (INVERT_KNEE_ANGLE) {
+        writeServo(pinKnee, 180.0 - kneeAngle);  // Invert knee angle
+      } else {
+        writeServo(pinKnee, kneeAngle);
+      }
+      // HIP: Normal direction handling
+      writeServo(pinHip, hipAngle);
+    }
+
+  private:
+    // Convert Angle (0-180) to PCA9685 Pulse
+    void writeServo(uint8_t pin, float angle) {
+      // Constrain angle to valid servo range
+      if (angle < 0) angle = 0;
+      if (angle > 180) angle = 180;
+
+      // Apply Direction Multiplier (Mirror mounting correction for HIP)
+      // We map 90deg as center. 
+      // If direction is -1: 90 stays 90, 100 becomes 80, 80 becomes 100.
+      float adjustedAngle = 90 + ((angle - 90) * direction);
+
+      uint16_t pulse = map(adjustedAngle, 0, 180, MIN_PULSE, MAX_PULSE);
+      pwm.setPWM(pin, 0, pulse);
+    }
+
+    // 2-DOF Inverse Kinematics Solver
+    // x: Horizontal distance from Hip (along leg swing axis)
+    // y: Vertical distance from Hip (Down is positive)
+    void solveIK(float x, float y, float &kneeOut, float &hipOut) {
+      // Prevent division by zero or sqrt negative
+      float distSq = x*x + y*y;
+      if (distSq == 0) {
+        kneeOut = 90; 
+        hipOut = 90; 
+        return;
+      }
+
+      float dist = sqrt(distSq);
+
+      // Check reachability
+      float maxReach = UPPER_LEG_LEN + LOWER_LEG_LEN;
+      if (dist > maxReach) {
+        // Target too far, clamp to max reach
+        float scale = maxReach / dist;
+        x *= scale;
+        y *= scale;
+        dist = maxReach;
+      }
+
+      // Law of Cosines for Knee Angle (Joint 2)
+      // cos(theta2) = (x^2 + y^2 - L1^2 - L2^2) / (2 * L1 * L2)
+      float cosKnee = (distSq - UPPER_LEG_LEN*UPPER_LEG_LEN - LOWER_LEG_LEN*LOWER_LEG_LEN) / 
+                      (2 * UPPER_LEG_LEN * LOWER_LEG_LEN);
+      
+      // Clamp for acos safety
+      if (cosKnee > 1) cosKnee = 1;
+      if (cosKnee < -1) cosKnee = -1;
+
+      float theta2 = acos(cosKnee); // Angle in Radians
+
+      // Law of Cosines for Hip Angle (Joint 1)
+      // theta1 = atan2(y, x) - acos((L1^2 + dist^2 - L2^2) / (2 * L1 * dist))
+      float theta1 = atan2(y, x) - acos((UPPER_LEG_LEN*UPPER_LEG_LEN + distSq - LOWER_LEG_LEN*LOWER_LEG_LEN) / 
+                                        (2 * UPPER_LEG_LEN * dist));
+
+      // Convert Radians to Degrees
+      float kneeDeg = degrees(theta2);
+      float hipDeg = degrees(theta1);
+
+      // --- Mechanical Offset Calibration ---
+      // These offsets align the mathematical model with your physical servo horn mounting
+      // Adjust these values if the leg posture looks incorrect at "neutral"
+      const float KNEE_OFFSET = 0.0;   // Typically 0 when using INVERT_KNEE_ANGLE
+      const float HIP_OFFSET  = 90.0;  // 90 = servo neutral position
+
+      kneeOut = kneeDeg + KNEE_OFFSET; 
+      hipOut  = hipDeg + HIP_OFFSET;
+    }
+};
+
+// Instantiate Legs
+RobotLeg legFL(legsConfig[FL].pinKnee, legsConfig[FL].pinHip, legsConfig[FL].direction);
+RobotLeg legFR(legsConfig[FR].pinKnee, legsConfig[FR].pinHip, legsConfig[FR].direction);
+RobotLeg legRL(legsConfig[RL].pinKnee, legsConfig[RL].pinHip, legsConfig[RL].direction);
+RobotLeg legRR(legsConfig[RR].pinKnee, legsConfig[RR].pinHip, legsConfig[RR].direction);
+
+RobotLeg* allLegs[NUM_LEGS] = { &legFL, &legFR, &legRL, &legRR };
+
+// ============================================================================
+// 4. GAIT ENGINE
+// ============================================================================
+
+// Gait States
+enum GaitState { STAND, WALK_FORWARD };
+GaitState currentState = STAND;
+
+// Gait Timing
+unsigned long lastStepTime = 0;
+int stepIndex = 0; // 0 to 3 for 4 legs sequence
+
+void setupGait() {
+  // Initialize all legs to stand position via IK
+  for (int i = 0; i < NUM_LEGS; i++) {
+    allLegs[i]->setTarget(0, STAND_HEIGHT);
+    allLegs[i]->update(); // Force immediate update
+  }
+  delay(500); // Brief wait for servos to settle
+}
+
+// Initialize ALL servos to exact 90 degrees (bypass IK)
+void initializeServosTo90() {
+  Serial.println("Setting all servos to 90 degrees (neutral)...");
+  for (int i = 0; i < NUM_LEGS; i++) {
+    // Write CENTER_PULSE directly to both knee and hip channels
+    pwm.setPWM(legsConfig[i].pinKnee, 0, CENTER_PULSE);
+    pwm.setPWM(legsConfig[i].pinHip, 0, CENTER_PULSE);
   }
 }
 
-// ── UDP ───────────────────────────────────────────────────────
-WiFiUDP udp;
-static uint8_t buf[64];
+void updateGait() {
+  if (currentState == STAND) {
+    // Keep standing via IK
+    for (int i = 0; i < NUM_LEGS; i++) {
+      allLegs[i]->setTarget(0, STAND_HEIGHT);
+      allLegs[i]->update();
+    }
+  } 
+  else if (currentState == WALK_FORWARD) {
+    // Simple Wave Gait using sine wave approximation
+    unsigned long now = millis();
+    if (now - lastStepTime > GAIT_SPEED) {
+      lastStepTime = now;
+      stepIndex = (stepIndex + 1) % 4;
+      
+      // Update each leg with phase-offset sine wave
+      for (int i = 0; i < NUM_LEGS; i++) {
+        // Phase offset: each leg 90 degrees (PI/2) apart for wave gait
+        float phase = (millis() * 0.005) + (i * PI / 2);
+        
+        // X: Forward/back oscillation
+        float x = sin(phase) * STEP_LENGTH;
+        
+        // Y: Height - lift when at swing extremes (abs(cos) creates lift at peaks)
+        float y = STAND_HEIGHT - abs(cos(phase)) * STEP_HEIGHT;
+        
+        allLegs[i]->setTarget(x, y);
+      }
+    }
 
-float bswapf(float v) {
-  uint32_t u; memcpy(&u, &v, 4);
-  u = __builtin_bswap32(u);
-  memcpy(&v, &u, 4); return v;
-}
-
-void handleCmd(int len) {
-  if (len < 5 || buf[0] != 0xCC || buf[1] != 0xDD) return;
-  uint8_t cmd = buf[2];
-  const uint8_t *p = buf + 5;
-  switch (cmd) {
-    case CMD_MOVE:
-      if (len < 17) break;
-      // ✅ FIXED: Cast to float pointer THEN dereference
-      g_vx = bswapf(*(float*)p);
-      g_vy = bswapf(*(float*)(p+4));
-      g_moving = true; g_estop = false; break;
-    case CMD_TURN:
-      if (len < 9) break;
-      g_yaw = bswapf(*(float*)p);
-      g_moving = true; g_estop = false; break;
-    case CMD_SET_SPEED:
-      if (len < 9) break;
-      g_speed = constrain(bswapf(*(float*)p), 0.0f, 1.0f); break;
-    case CMD_STOP:
-      g_moving = false; g_vx = g_vy = g_yaw = 0; break;
-    case CMD_ESTOP:
-      g_estop = true; g_moving = false; g_vx = g_vy = g_yaw = 0; break;
+    // Update all servos with interpolated positions
+    for (int i = 0; i < NUM_LEGS; i++) {
+      allLegs[i]->update();
+    }
   }
 }
 
-void receiveCommands() {
-  int sz = udp.parsePacket(); if (sz <= 0) return;
-  handleCmd(udp.read(buf, sizeof(buf)));
-}
+// ============================================================================
+// 5. MAIN ARDUINO FUNCTIONS
+// ============================================================================
 
-// ── Telemetry & Announce ──────────────────────────────────────
-void sendTelemetry() {
-  uint8_t pkt[20];
-  pkt[0] = 0xEE; pkt[1] = 0xFF;
-  float ts = millis() / 1000.0f; memcpy(pkt+2,&ts, 4);
-  memset(pkt+6, 0, 14);
-  udp.beginPacket(SERVER_IP, MASTER_PORT);
-  udp.write(pkt, 20); udp.endPacket();
-}
-
-void announce() {
-  char msg[32]; snprintf(msg, sizeof(msg), "QUAD:%s", WiFi.localIP().toString().c_str());
-  udp.beginPacket(IPAddress(255,255,255,255), ANNOUNCE_PORT);
-  udp.print(msg); udp.endPacket();
-}
-
-// ── Setup / Loop ──────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
-  Wire.begin(21, 22);
-  pcaInit();
-  for (uint8_t i = 0; i < 4; i++) setLegNow(i, 0, 0);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("[WiFi] Connecting");
-  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
-  Serial.printf("\n[WiFi] %s\n", WiFi.localIP().toString().c_str());
-  udp.begin(MASTER_PORT);
-  Serial.println("[READY] IK Engine Active");
+  Wire.begin(21, 22); // ESP32 SDA=GPIO21, SCL=GPIO22
+  
+  pwm.begin();
+  pwm.setPWMFreq(SERVO_FREQ);
+  
+  Serial.println("Spider Robot Initializing...");
+  
+  // STEP 1: Set ALL servos to exact 90 degrees (neutral mechanical position)
+  initializeServosTo90();
+  
+  // STEP 2: Wait 2 seconds for robot to stabilize in neutral pose
+  Serial.println("Waiting 2 seconds in neutral position...");
+  delay(2000);
+  
+  // STEP 3: Initialize gait system and start walking
+  Serial.println("Standing Complete. Starting Walk Forward.");
+  setupGait();
+  currentState = WALK_FORWARD;
 }
 
 void loop() {
-  static uint32_t lastTelem = 0, lastAnnounce = 0;
-  uint32_t now = millis();
-  receiveCommands();
-  ikGaitTick();
-  if (now - lastTelem    > 200 ) { lastTelem    = now; sendTelemetry(); }
-  if (now - lastAnnounce > 3000) { lastAnnounce = now; announce(); }
+  updateGait();
+  // Small delay to prevent watchdog trigger and allow servo smoothing
+  delay(5); 
 }
